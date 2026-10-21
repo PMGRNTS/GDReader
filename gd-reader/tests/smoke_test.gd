@@ -15,6 +15,7 @@ func _init() -> void:
 	_test_zoom_breakpoints()
 	_test_fuzzy_score()
 	_test_coupling()
+	_test_blast()
 	print("\n%d passed, %d failed" % [_passed, _failed])
 	quit(1 if _failed > 0 else 0)
 
@@ -101,6 +102,29 @@ func _test_coupling() -> void:
 		Analyzer.reach_score(GDParser.parse("func f():\n\tget_parent().x = 1\n\towner.y = 2\n")), 2)
 	check("plain code has no reach",
 		Analyzer.reach_score(GDParser.parse("func f():\n\tvar a := 1\n")), 0)
+
+
+## §10.6 blast radius: dependents by ring, walking edges backwards.
+func _test_blast() -> void:
+	# a uses core; b uses a; c uses b; core uses lib (a dependency, not a dependent).
+	var edges := [
+		{"from_file": "a", "to_file": "core", "weight": 10.0},
+		{"from_file": "b", "to_file": "a", "weight": 6.0},
+		{"from_file": "c", "to_file": "b", "weight": 4.0},
+		{"from_file": "b", "to_file": "core", "weight": 3.0},
+		{"from_file": "core", "to_file": "lib", "weight": 5.0},
+	]
+	var r := Analyzer.blast(edges, "core", 3)
+	var hops: Dictionary = r["hops"]
+	check("blast source is ring 0", hops.get("core"), 0)
+	check("direct user is ring 1", hops.get("a"), 1)
+	check("file reached two ways takes its nearest ring", hops.get("b"), 1)
+	check("user of a user is ring 2", hops.get("c"), 2)
+	check("dependencies are not dependents", hops.has("lib"), false)
+	check("parent is the reason a file was reached", r["parent"].get("c"), "b")
+	check("depth limits the rings",
+		Analyzer.blast(edges, "core", 1)["hops"].has("c"), false)
+	check("nothing depends on a leaf", Analyzer.blast(edges, "c", 3)["hops"].size(), 1)
 
 
 func _edge_kind(edges: Array, from_file: String, to_file: String, kind: String) -> bool:
