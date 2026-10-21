@@ -35,6 +35,8 @@ const ROWS := [
 	["Ctrl+E", "Detected lines: pointed at → this file → all"],
 	["G  Shift+G", "Cycle couplings; the camera frames each pair"],
 	["A", "Adopt the selected coupling as twine"],
+	["B", "Blast radius: what depends on this file, ring by ring"],
+	["1  2  3", "Blast radius depth, in hops"],
 
 	["§", "Read"],
 	["Ctrl+F", "Find within the focused card"],
@@ -45,7 +47,7 @@ const ROWS := [
 	["Ctrl+O", "Open a different project"],
 	["R", "Re-read the project from disk"],
 	["?   F1", "Show or hide this legend"],
-	["Esc", "Back out: overview, framing, then selection"],
+	["Esc", "Back out: blast, overview, framing, then selection"],
 	["Ctrl+Q", "Quit"],
 ]
 

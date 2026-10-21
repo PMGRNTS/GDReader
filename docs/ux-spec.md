@@ -118,7 +118,8 @@ jump.** ✅
 | Detected lines: pointed at → this file → all | `Ctrl+E` |
 | Connections panel | `C` |
 | Overview (latched; click a card to land) | `M` |
-| Back out (overview, framing, selection) | `Esc` |
+| Blast radius / its depth | `B`, then `1` `2` `3` |
+| Back out (blast, overview, framing, selection) | `Esc` |
 | Quit | `Ctrl+Q` / `⌘Q` |
 | Select text (see §8) | `Alt`-drag |
 | Loose ends panel | `Ctrl+L` |
@@ -169,6 +170,25 @@ Compatibility).
 
 Camera moves are eased, 🎚~180ms. Every jump — focus move, folder hop, twine-follow,
 fuzzy-find — animates rather than cutting, so the user keeps their spatial bearings.
+
+### 3.4a Fly-to ✅
+
+A long jump — follow twine, Go to file, Back / Forward, a connection's **Go**, landing
+from overview or blast radius — is a **flight**, not a slide. The camera pulls back
+just far enough to show both where you are and where you're going, pans while zoomed
+out, then drops in. A straight slide at Read zoom is a long smear of code; the flight
+shows the jump as one move across the map, so you keep your bearings.
+
+- The path is a dip in log-zoom between the two ends' zooms, as deep as fitting both
+  cards on screen needs. Coming from overview the ends already fit, so it just glides
+  in.
+- Panning uses smootherstep — still at both ends, fastest mid-flight, where the camera
+  is furthest out and the fast part is the legible part.
+- 🎚 0.5s for the shortest flight plus 0.14s per doubling of distance, capped at 1.15s.
+  Jumps under 🎚0.9 screens keep the ordinary ease.
+- The flight reads its destination and final zoom live each frame, so anything that
+  retargets mid-flight (a framing, a peek, a zoom) bends the path rather than fighting
+  it.
 
 ### 3.5 First open ✅
 
@@ -496,6 +516,31 @@ focused file, so moving focus would rebuild the list on every press and the thin
 were cycling through would change under you. `Esc` stops framing and returns to the
 focused card at the zoom you were reading at.
 
+### 10.6 Blast radius ✅
+
+`B` answers *what might break if I touch this file?* It walks the coupling edges
+**backwards** from the focused file — an edge from A to B means A uses B — and lights
+every dependent in rings: direct users, their users, and so on to the chosen depth
+(`1` / `2` / `3`, default 2). Each file appears once, at its nearest ring; the edge
+drawn to it is the strongest reason it was reached.
+
+The rings **ignite in order**, 🎚~280ms apart, so the animation is the information:
+you watch the change spread. A shock ring leaves the source, the edges that carried it
+grow outward, each card flashes and pings as it lights, and a numbered badge says its
+ring at Map zoom where colour alone is hard to judge. Heat cools with distance —
+orange, amber, pale yellow — and everything outside the radius drops to near-dark.
+
+The camera pulls back to frame the whole spread and returns to your zoom on `Esc`.
+Clicking a card lands there, like overview. Stepping with `H` / `L` re-runs the blast
+from the new file, so you can walk a folder and compare each file's reach.
+
+Halos are stacked outlines beneath the cards, not a blur: GL Compatibility can't
+afford a blur pass across dozens of cards, and beneath the cards the glow fills the
+gaps without ever drawing over code.
+
+It inherits §10.4's limits — dynamic paths, duck typing and scene wiring are invisible
+— so it shows the **least** a change could reach, never the most.
+
 ---
 
 ## Theme
@@ -585,6 +630,8 @@ query scores on the shared prefix instead of on anything meaningful.
 
 - §3.2a toolbar, context pill and `M` overview; `Esc` backs out instead of quitting
 - §5.7 connections panel, with pointed-at / this-file / all line modes on `Ctrl+E`
+- §10.6 blast radius on `B`, depth on `1`–`3`, animated ring by ring
+- §3.4a fly-to for every long jump
 
 Fixed along the way: `Ctrl+L` never opened Loose ends — the plain `L` (next file) arm
 matched first. Chords are now handled before plain keys. Back / Forward now record
@@ -612,7 +659,9 @@ Dev harness:
 
 `--focus ROW,COL` opens on a given cell, `--zoom N` opens at a zoom level,
 `--all-inferred` / `--file-lines` start in those line modes, `--hover N` points at the
-Nth coupling row, `--twine N` selects the focused file's Nth twine, `--overview` opens in overview, `--no-connections` hides the panel, `--peek row|map` captures a
+Nth coupling row, `--twine N` selects the focused file's Nth twine, `--blast N` opens blast radius
+at depth N, `--wait FRAMES` delays the capture (default 30), `--jump ROW,COL`
+makes a jump at open (with `--wait`, captures a flight mid-air), `--overview` opens in overview, `--no-connections` hides the panel, `--peek row|map` captures a
 peek in progress, `--legend` opens the shortcut legend, `--find QUERY` opens the finder
 on a query, and `--shot out.png` captures a frame and exits — which is how each state above was verified.
 

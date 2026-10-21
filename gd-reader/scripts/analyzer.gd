@@ -174,6 +174,39 @@ static func _is_engine_type(name: String) -> bool:
 	return false
 
 
+## Who depends on `source`, ring by ring (§10.6) — what might break if you
+## touch it. An edge from A to B means A uses B, so dependents are found by
+## walking edges BACKWARDS from the source.
+##
+## Each file appears once, at its nearest ring. Edges arrive strongest first, so
+## the parent recorded for a file is the strongest reason it was reached.
+##
+## Returns { hops: {file: ring}, parent: {file: file} }, the source at ring 0.
+static func blast(edges: Array, source: String, depth: int) -> Dictionary:
+	var users := {}                        # file -> [files that use it]
+	for e in edges:
+		var to: String = e["to_file"]
+		if not users.has(to):
+			users[to] = []
+		users[to].append(e["from_file"])
+
+	var hops := {source: 0}
+	var parent := {}
+	var frontier: Array = [source]
+	for ring in range(1, depth + 1):
+		var next: Array = []
+		for f in frontier:
+			for u in users.get(f, []):
+				if not hops.has(u):
+					hops[u] = ring
+					parent[u] = f
+					next.append(u)
+		if next.is_empty():
+			break
+		frontier = next
+	return {"hops": hops, "parent": parent}
+
+
 ## A short human phrase for an edge, used to prefill the description when the
 ## user adopts it as twine.
 static func describe(edge: Dictionary) -> String:

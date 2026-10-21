@@ -58,6 +58,16 @@ const ADOPT := Color("57c2a8")
 const LABEL_BG := Color("0a0c0fee")
 const LABEL_FG := Color("e8edf4")
 
+# Blast radius (§10.6): heat that cools with distance from the source.
+const BLAST_SRC := Color("fff1c9")
+const BLAST_RINGS := [Color("ff7a3d"), Color("ffb347"), Color("e8d46a")]
+const BLAST_INK := Color("1a1206")        # badge numerals, on the heat colour
+
+static func blast_color(ring: int) -> Color:
+	if ring <= 0:
+		return BLAST_SRC
+	return BLAST_RINGS[mini(ring, BLAST_RINGS.size()) - 1]
+
 
 ## Symbol kind colours, shared by the Skim table of contents and the picker.
 static func for_kind(kind: String) -> Color:

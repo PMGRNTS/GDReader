@@ -28,6 +28,14 @@ const MAX_RECENTS := 12
 ## Framing a coupling pair (§10.5) reuses peek's fit maths with a little more air.
 const FRAME_MARGIN := 1.30
 
+## Fly-to (§3.4a). A long jump pulls back far enough to show where you are and
+## where you're going, pans while zoomed out, then drops in.
+const FLY_MIN_SCREENS := 0.9     # 🎚 nearer than this, the ordinary ease is enough
+const FLY_BASE := 0.50           # 🎚 seconds for the shortest flight…
+const FLY_PER_DOUBLING := 0.14   # 🎚 …plus this for each doubling of distance
+const FLY_MAX := 1.15
+const FLY_MARGIN := 1.25
+
 var rows: Array = []             # from ProjectScanner
 var cards: Array = []            # Array[Array[Card]], parallel to rows
 var project_root := ""
@@ -87,6 +95,21 @@ var _overview_saved_zoom := 1.0
 var _cli_overview := false
 var _cli_hover := -1
 var _cli_twine := -1
+var _cli_blast := 0
+var _cli_jump := Vector2i(-1, -1)
+var _fly := {}                   # the flight in progress, empty when there's none
+var _shot_wait := 30
+
+## Blast radius (§10.6): what depends on the focused file, ring by ring.
+const BLAST_DIM := Color(0.26, 0.28, 0.32, 1.0)
+var blast_on := false
+var blast_depth := 2
+var blast_hops := {}             # file_key -> ring (focus is 0)
+var blast_parent := {}           # file_key -> the file it was reached through
+var blast_cards := {}            # file_key -> Card, for the layer's per-frame draw
+var _blast_started := 0
+var _blast_saved_zoom := 1.0
+var _blast: BlastLayer
 var _cli_project := ""
 var _shot_path := ""
 var _cli_focus := Vector2i(-1, -1)
@@ -132,6 +155,10 @@ func _ready() -> void:
 	_twine = TwineLayer.new()
 	_twine.setup(self, _font, _bold)
 	add_child(_twine)
+
+	_blast = BlastLayer.new()
+	_blast.setup(self, _bold)
+	add_child(_blast)
 
 	_dialog = LinkDialog.new()
 	var dlg_layer := CanvasLayer.new()
@@ -194,6 +221,12 @@ func _ready() -> void:
 		_on_edge_hovered(_cli_hover)
 	if _cli_twine >= 0:
 		select_twine(_cli_twine)
+	if _cli_jump.x >= 0 and not cards.is_empty():
+		var jr := clampi(_cli_jump.x, 0, rows.size() - 1)
+		_jump_to(Vector2i(jr, clampi(_cli_jump.y, 0, cards[jr].size() - 1)))
+	if _cli_blast > 0:
+		blast_depth = clampi(_cli_blast, 1, 3)
+		toggle_blast()
 	if _cli_overview:
 		toggle_overview()
 	if _cli_peek != "":
@@ -228,6 +261,14 @@ func _parse_cmdline() -> void:
 			_cli_overview = true
 		elif a == "--hover" and i + 1 < args.size():
 			_cli_hover = int(args[i + 1])
+		elif a == "--jump" and i + 1 < args.size():
+			var jc: PackedStringArray = args[i + 1].split(",")
+			if jc.size() == 2:
+				_cli_jump = Vector2i(int(jc[0]), int(jc[1]))
+		elif a == "--wait" and i + 1 < args.size():
+			_shot_wait = int(args[i + 1])
+		elif a == "--blast" and i + 1 < args.size():
+			_cli_blast = int(args[i + 1])
 		elif a == "--twine" and i + 1 < args.size():
 			_cli_twine = int(args[i + 1])
 		elif a == "--no-connections":
@@ -253,7 +294,7 @@ func _parse_cmdline() -> void:
 func _capture_and_quit() -> void:
 	await get_tree().process_frame
 	# Let the camera settle and the near-focus cards finish loading text.
-	for i in 30:
+	for i in _shot_wait:
 		await get_tree().process_frame
 	var img := get_viewport().get_texture().get_image()
 	img.save_png(_shot_path)
@@ -327,7 +368,9 @@ func _build_chrome() -> void:
 ## Read / Skim / Map are about the focused card, so they bring the camera back
 ## to it from overview or a framed coupling rather than zooming those in place.
 func _zoom_to_mode(z: float) -> void:
-	if _overview:
+	if blast_on:
+		end_blast()
+	elif _overview:
 		end_overview()
 	elif _framing:
 		_framing = false
@@ -355,6 +398,10 @@ func _on_action(name: String) -> void:
 		"skim": _zoom_to_mode(0.38)
 		"map": _zoom_to_mode(0.16)
 		"overview": toggle_overview()
+		"blast": toggle_blast()
+		"blast_1": set_blast_depth(1)
+		"blast_2": set_blast_depth(2)
+		"blast_3": set_blast_depth(3)
 		"connections": toggle_connections()
 		"loose": open_loose_ends()
 		"refresh": refresh_all()
@@ -599,7 +646,7 @@ func _apply_focus(snap := false) -> void:
 			card.focused = is_focus
 			# Unfocused cards are dimmed and lowered in contrast; no blur,
 			# which is expensive under GL Compatibility (§3.4).
-			card.modulate = Color.WHITE if is_focus else Color(0.62, 0.65, 0.70, 1.0)
+			card.modulate = _tint_for(card, is_focus)
 
 			# Only Read zoom needs file text at all; Skim and Map render from
 			# the symbol index, so zooming out frees every card's text (§4).
@@ -633,8 +680,24 @@ func _apply_focus(snap := false) -> void:
 			_overview = false
 			_clear_peek_marks()
 			set_zoom(_overview_saved_zoom)
+		# In blast radius, stepping to another file re-runs it from there, so you
+		# can walk a folder and watch each file's reach.
+		if blast_on:
+			_run_blast()
 	_sync_connections()
 	_refresh_chrome()
+
+
+## Focus is lit and the rest dimmed; in blast radius the rings are lit instead,
+## brightest nearest, and each card ignites as its ring arrives.
+func _tint_for(card: Card, is_focus: bool) -> Color:
+	if not blast_on:
+		return Color.WHITE if is_focus else Color(0.62, 0.65, 0.70, 1.0)
+	if not blast_hops.has(card.file_key):
+		return BLAST_DIM
+	var ring: int = blast_hops[card.file_key]
+	var lit := Color.WHITE if ring <= 1 else Color.WHITE.darkened(0.1 * (ring - 1))
+	return BLAST_DIM.lerp(lit, BlastLayer.reveal(ring, blast_elapsed()))
 
 
 ## Screen pixels to shift the focal point by, so focus centres in the part of
@@ -661,6 +724,7 @@ func _refresh_chrome() -> void:
 		"detail": detail,
 		"zoom_pct": round(zoom_level * 100.0),
 		"overview": _overview,
+		"blast": blast_on,
 		"connections_open": _conn.visible,
 		"connections_n": _cycle.size() + inferred_for_focus().size(),
 		"loose_n": _loose_n,
@@ -679,6 +743,23 @@ func _refresh_pill() -> void:
 		var sel_card: Card = cards[_peek_sel.x][_peek_sel.y]
 		_pill.present("Peeking  ·  release Space to land on %s" % sel_card.file_name,
 			Palette.HEADING, [])
+	elif blast_on:
+		var counts := [0, 0, 0, 0]
+		for k in blast_hops:
+			counts[blast_hops[k]] += 1
+		var text := "Blast radius  ·  nothing in the project depends on %s" % focused_card().file_name
+		if blast_hops.size() > 1:
+			var parts: Array = ["%d direct" % counts[1]]
+			for ring in range(2, blast_depth + 1):
+				parts.append("%d at %d hops" % [counts[ring], ring])
+			text = "Blast radius  ·  %s  ·  %s" % [focused_card().file_name, "  ·  ".join(parts)]
+		var buttons: Array = []
+		for d in range(1, 4):
+			buttons.append([("▸ " if d == blast_depth else "") + ("%d hop" % d) + ("" if d == 1 else "s"),
+				"Show what depends on this file up to %d hop%s away  ·  %d" % [d, "" if d == 1 else "s", d],
+				"blast_%d" % d])
+		buttons.append(esc)
+		_pill.present(text, Palette.blast_color(1), buttons)
 	elif _overview:
 		_pill.present("Overview  ·  click a card to land there", Palette.HEADING, [esc])
 	elif drag_active:
@@ -721,7 +802,9 @@ func _process(delta: float) -> void:
 	# position cue (§3.4).
 	_peek_tick()
 
-	if not is_equal_approx(zoom_level, _zoom_goal):
+	if not _fly.is_empty():
+		_fly_tick()
+	elif not is_equal_approx(zoom_level, _zoom_goal):
 		zoom_level = lerpf(zoom_level, _zoom_goal, clampf(delta * ZOOM_EASE, 0.0, 1.0))
 		if absf(zoom_level - _zoom_goal) < 0.002:
 			zoom_level = _zoom_goal
@@ -732,7 +815,10 @@ func _process(delta: float) -> void:
 	var z := (vp.y * 0.90) / Card.H * zoom_level
 	_cam.zoom = Vector2(z, z)
 	var goal := _cam_target + _chrome_offset() / z
-	_cam.position = _cam.position.lerp(goal, clampf(delta * CAM_EASE, 0.0, 1.0))
+	if _fly.is_empty():
+		_cam.position = _cam.position.lerp(goal, clampf(delta * CAM_EASE, 0.0, 1.0))
+	else:
+		_cam.position = _fly_centre() + _chrome_offset() / z
 	# Cards size their Skim/Map text against this, so a change has to repaint
 	# them — otherwise they keep text sized for the previous zoom.
 	if not is_equal_approx(z, _last_px):
@@ -742,6 +828,7 @@ func _process(delta: float) -> void:
 				card.px_scale = z
 				card.queue_redraw()
 	_process_drag()
+	_tick_blast()
 	queue_redraw()
 	# Twine anchors follow the camera, the focused card's scroll and the drag, so
 	# the layer repaints every frame rather than trying to track each of those.
@@ -806,7 +893,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			drag_to_pos = get_global_mouse_position()
 			_twine.queue_redraw()
 			return
-		if _peek_stage > 0 or _overview:
+		if _peek_stage > 0 or _overview or blast_on:
 			var over := card_at_world(get_global_mouse_position())
 			if over != null:
 				var cell := cell_for(over.file_key)
@@ -919,6 +1006,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				toggle_connections()
 			KEY_M:
 				toggle_overview()
+			KEY_B:
+				toggle_blast()
+			KEY_1, KEY_2, KEY_3:
+				if blast_on:
+					set_blast_depth(event.keycode - KEY_0)
 			KEY_G:
 				cycle_adopt(-1 if event.shift_pressed else 1)
 			KEY_A:
@@ -983,7 +1075,9 @@ func _on_release(world: Vector2) -> void:
 	if _press_card != null and moved < DRAG_THRESHOLD:
 		var cell := cell_for(_press_card.file_key)
 		if cell.x >= 0:
-			if _overview:
+			if blast_on:
+				end_blast(cell)
+			elif _overview:
 				end_overview(cell)
 			else:
 				_jump_to(cell)
@@ -1064,11 +1158,72 @@ func follow_twine() -> void:
 ## Every discrete jump goes through here, recording both ends so Back returns to
 ## where you were and Forward to where you went (§3.9).
 func _jump_to(cell: Vector2i) -> void:
+	var from := _focal_point()
+	var from_zoom := zoom_level
 	_push_history()
 	focus_row = cell.x
 	focus_col = cell.y
 	_push_history()
 	_apply_focus()
+	_begin_fly(from, from_zoom)
+
+
+# -------------------------------------------------------------------- fly-to
+
+## The world point currently at the focal centre — where a flight starts from.
+func _focal_point() -> Vector2:
+	return _cam.position - _chrome_offset() / px_scale()
+
+
+## Starts a flight from `from` at `from_zoom` to wherever focus now points.
+##
+## The path is a dip in log-zoom: out to the zoom that fits both ends on screen,
+## then back in. Panning happens mostly while zoomed out, so the trip reads as
+## one move across the map rather than a long smear of code.
+##
+## The flight reads its destination and final zoom LIVE every frame, so a
+## framing, peek or zoom that retargets mid-flight bends the path rather than
+## fighting it.
+func _begin_fly(from: Vector2, from_zoom: float) -> void:
+	var vp := get_viewport_rect().size
+	var read_screen_w := vp.x / ((vp.y * 0.90) / Card.H)
+	var screens := from.distance_to(_cam_target) / read_screen_w
+	if screens < FLY_MIN_SCREENS:
+		return
+	var card := Vector2(Card.W, Card.H)
+	var bounds := Rect2(from - card * 0.5, card).merge(Rect2(_cam_target - card * 0.5, card))
+	var out_zoom := _fit_zoom(bounds, FLY_MARGIN)
+	var mid := lerpf(log(from_zoom), log(_zoom_goal), 0.5)
+	_fly = {
+		"t0": Time.get_ticks_msec(),
+		"dur": minf(FLY_BASE + FLY_PER_DOUBLING * log(1.0 + screens) / log(2.0), FLY_MAX),
+		"from": from,
+		"log_z0": log(from_zoom),
+		# Only dip if the ends don't already fit — from overview it just glides in.
+		"dip": maxf(0.0, mid - log(out_zoom)),
+		"t": 0.0,
+	}
+
+
+func _fly_tick() -> void:
+	var t: float = (Time.get_ticks_msec() - int(_fly["t0"])) / 1000.0 / float(_fly["dur"])
+	if t >= 1.0:
+		_fly = {}
+		zoom_level = _zoom_goal
+		_sync_detail()
+		return
+	_fly["t"] = t
+	var sz := smoothstep(0.0, 1.0, t)
+	zoom_level = exp(lerpf(_fly["log_z0"], log(_zoom_goal), sz) - float(_fly["dip"]) * sin(PI * sz))
+	_sync_detail()
+
+
+## Smootherstep: still at both ends, fastest in the middle — where the dip has the
+## camera zoomed furthest out, so the fast part of the pan is the legible part.
+func _fly_centre() -> Vector2:
+	var t: float = _fly["t"]
+	var s := t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+	return (_fly["from"] as Vector2).lerp(_cam_target, s)
 
 
 func _push_history() -> void:
@@ -1091,9 +1246,12 @@ func history_step(dir: int) -> void:
 		return
 	_hist_idx = next
 	var cell: Vector2i = _history[_hist_idx]
+	var from := _focal_point()
+	var from_zoom := zoom_level
 	focus_row = cell.x
 	focus_col = cell.y
 	_apply_focus()
+	_begin_fly(from, from_zoom)
 
 
 func _scroll_focused(lines: float) -> void:
@@ -1157,7 +1315,7 @@ func cycle_count() -> int:
 ## far out to pick a file from — so the first stage fits the CURRENT ROW, and only
 ## a longer hold opens out to the whole project.
 func peek_press() -> void:
-	if _peek_down_at >= 0 or _overview:
+	if _peek_down_at >= 0 or _overview or blast_on:
 		return
 	_peek_down_at = Time.get_ticks_msec()
 	_peek_saved_zoom = _zoom_goal
@@ -1307,6 +1465,8 @@ func select_coupling(idx: int) -> void:
 	var candidates := inferred_for_focus()
 	if idx < 0 or idx >= candidates.size():
 		return
+	if blast_on:
+		end_blast()
 	if _overview:
 		end_overview()
 	if not _framing:
@@ -1503,6 +1663,8 @@ func toggle_overview() -> void:
 		return
 	if cards.is_empty() or _peek_stage > 0:
 		return
+	if blast_on:
+		end_blast()
 	_overview_saved_zoom = _frame_saved_zoom if _framing else _zoom_goal
 	adopt_idx = -1
 	_overview = true
@@ -1529,10 +1691,94 @@ func end_overview(land := Vector2i(-1, -1)) -> void:
 		_apply_focus()
 
 
+# -------------------------------------------------------------- blast radius
+
+## What might break if you touch this file (§10.6): everything that depends on
+## it, ring by ring, with the camera pulled back to show the whole spread.
+func toggle_blast() -> void:
+	if blast_on:
+		end_blast()
+		return
+	if cards.is_empty() or _peek_stage > 0:
+		return
+	if _overview:
+		end_overview()
+	_blast_saved_zoom = _frame_saved_zoom if _framing else _zoom_goal
+	blast_on = true
+	_run_blast()
+
+
+func set_blast_depth(depth: int) -> void:
+	blast_depth = clampi(depth, 1, 3)
+	if blast_on:
+		_run_blast()
+	_refresh_chrome()
+
+
+func blast_elapsed() -> float:
+	return (Time.get_ticks_msec() - _blast_started) / 1000.0
+
+
+## Computes the rings from the focused file and restarts the animation.
+func _run_blast() -> void:
+	var src := focused_card()
+	var r := Analyzer.blast(inferred, src.file_key, blast_depth)
+	blast_hops = r["hops"]
+	blast_parent = r["parent"]
+	blast_cards.clear()
+	var bounds := Rect2(src.position, Vector2(Card.W, Card.H))
+	for key in blast_hops:
+		var c := card_for(key)
+		if c != null:
+			blast_cards[key] = c
+			bounds = bounds.merge(Rect2(c.position, Vector2(Card.W, Card.H)))
+	_blast_started = Time.get_ticks_msec()
+	adopt_idx = -1
+	_framing = true                         # the camera belongs to the spread
+	# A file nothing depends on stays where it is; there's nothing to show.
+	if blast_hops.size() > 1:
+		set_zoom(_fit_zoom(bounds, FRAME_MARGIN))
+		_cam_target = bounds.get_center()
+	_blast.repaint()
+	_refresh_chrome()
+
+
+## While the rings are still igniting, tint and repaint every frame; after,
+## only the layer repaints, because the camera may still be easing.
+func _tick_blast() -> void:
+	if not blast_on:
+		return
+	if blast_elapsed() < BlastLayer.settle_time(blast_depth):
+		for row in cards:
+			for card in row:
+				card.modulate = _tint_for(card, card.focused)
+	_blast.repaint()
+
+
+## Leave blast radius, landing on `land` if given, at the zoom you came from.
+func end_blast(land := Vector2i(-1, -1)) -> void:
+	if not blast_on:
+		return
+	blast_on = false
+	blast_hops = {}
+	blast_parent = {}
+	blast_cards.clear()
+	_framing = false
+	_clear_peek_marks()
+	_blast.repaint()
+	set_zoom(_blast_saved_zoom)
+	if land.x >= 0 and land != Vector2i(focus_row, focus_col):
+		_jump_to(land)
+	else:
+		_apply_focus()
+
+
 ## Esc backs out of one thing at a time, innermost first. It no longer quits:
 ## a key you press to dismiss things shouldn't also close the window.
 func back_out() -> void:
-	if _overview:
+	if blast_on:
+		end_blast()
+	elif _overview:
 		end_overview()
 	elif _framing:
 		stop_framing()
