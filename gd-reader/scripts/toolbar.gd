@@ -14,13 +14,13 @@ signal action(name: String)
 
 var _crumb_dir: Label
 var _crumb_file: Label
-var _crumb_pos: Label
 var _back: Button
 var _fwd: Button
 var _find: Button
 var _modes: Array = []           # [Read, Skim, Map], indexed by Card.Detail
 var _zoom_pct: Label
 var _overview: Button
+var _blast: Button
 var _connections: Button
 var _loose: Button
 
@@ -53,30 +53,25 @@ func _init(font: Font, bold: Font) -> void:
 	_add(row, "▴", "Folder above  ·  Shift+K / Shift+Wheel", "folder_up", font)
 	_add(row, "▾", "Folder below  ·  Shift+J / Shift+Wheel", "folder_down", font)
 	_gap(row)
-	_back = _add(row, "← Back", "Back to the previous jump  ·  Alt+←", "back", font)
+	_back = _add(row, "←", "Back to the previous jump  ·  Alt+←", "back", font)
 	_fwd = _add(row, "→", "Forward  ·  Alt+→", "forward", font)
 	_gap(row)
 
-	# --- where you are. Expands, and clips before anything else gives way.
-	var crumb := HBoxContainer.new()
-	crumb.add_theme_constant_override("separation", 0)
-	crumb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	crumb.custom_minimum_size = Vector2(120, 0)
-	crumb.clip_contents = true
-	crumb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(crumb)
-	_crumb_dir = UIKit.label("", font, 13, Palette.META)
-	crumb.add_child(_crumb_dir)
+	# --- where you are. The file name always shows; the folder and position
+	# after it trim with an ellipsis before any button gives way.
 	_crumb_file = UIKit.label("", bold, 14, Palette.HEADING)
-	crumb.add_child(_crumb_file)
-	_crumb_pos = UIKit.label("", font, 12, Palette.LINE_NUM)
-	crumb.add_child(_crumb_pos)
+	row.add_child(_crumb_file)
+	_crumb_dir = UIKit.label("", font, 12, Palette.META)
+	_crumb_dir.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_crumb_dir.clip_text = true
+	_crumb_dir.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	row.add_child(_crumb_dir)
 
 	# --- find
-	_add(row, "Go to file  " + UIKit.mod("P"), "Jump to any file by name  ·  " + UIKit.mod("P"),
-		"finder", font)
-	_find = _add(row, "Find  " + UIKit.mod("F"), "Find within the focused card  ·  " + UIKit.mod("F"),
-		"search", font)
+	# Key hints live in the tooltips; in the labels they cost more room than the
+	# bar has once every button is on it.
+	_add(row, "Go to file", "Jump to any file by name  ·  " + UIKit.mod("P"), "finder", font)
+	_find = _add(row, "Find", "Find within the focused card  ·  " + UIKit.mod("F"), "search", font)
 	_gap(row)
 
 	# --- zoom: the three modes are the zoom axis's named stops (§4)
@@ -96,6 +91,9 @@ func _init(font: Font, bold: Font) -> void:
 	row.add_child(_zoom_pct)
 	_overview = _add(row, "Overview", "Whole project; click a card to land there  ·  M\n"
 		+ "(or hold Space to peek)", "overview", font, true)
+	_blast = _add(row, "Blast", "Blast radius — everything that depends on this file, ring by ring  ·  B\n"
+		+ "1 / 2 / 3 set how many hops", "blast", font, true)
+	_blast.add_theme_color_override("font_color", Palette.blast_color(1))
 	_gap(row)
 
 	# --- panels
@@ -130,9 +128,8 @@ func _gap(parent: Control) -> void:
 
 ## `s` is a plain snapshot from the canvas — see CanvasView._toolbar_state().
 func refresh(s: Dictionary) -> void:
-	_crumb_dir.text = str(s.get("dir", ""))
 	_crumb_file.text = str(s.get("file", ""))
-	_crumb_pos.text = "    %d/%d  ·  folder %d/%d" % [
+	_crumb_dir.text = "   %s   %d/%d  ·  folder %d/%d" % [s.get("dir", ""),
 		s.get("file_i", 0), s.get("file_n", 0), s.get("row_i", 0), s.get("row_n", 0)]
 	_back.disabled = not s.get("can_back", false)
 	_fwd.disabled = not s.get("can_fwd", false)
@@ -143,6 +140,7 @@ func refresh(s: Dictionary) -> void:
 		_modes[i].set_pressed_no_signal(i == detail)
 	_zoom_pct.text = "%d%%" % int(s.get("zoom_pct", 100))
 	_overview.set_pressed_no_signal(s.get("overview", false))
+	_blast.set_pressed_no_signal(s.get("blast", false))
 
 	var n: int = s.get("connections_n", 0)
 	_connections.text = "Connections  %d" % n if n > 0 else "Connections"
