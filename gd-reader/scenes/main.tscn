@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://dbrwpi7xhclau"]
+
+[ext_resource type="Script" uid="uid://dg0fpj3oavdk6" path="res://scripts/canvas_view.gd" id="1_canvas"]
+
+[node name="Main" type="Node2D" unique_id=270451073]
+script = ExtResource("1_canvas")
