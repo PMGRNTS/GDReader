@@ -115,6 +115,11 @@ static func _add_group_edges(index: Dictionary, acc: Dictionary) -> void:
 
 ## A file declaring `signal died` and another handling `_on_died` or connecting
 ## to `died` are paired by convention. Weakest rule here, and marked as such.
+##
+## A name alone can't tell nine heroes' `setup_completed` apart, and pairing a
+## use with every declarer draws a web of edges where one is real. So when a
+## name is shared, keep only declarers this file is already coupled to, else
+## ones in its own folder, else nothing — an edge we can't place is no evidence.
 static func _add_signal_edges(index: Dictionary, acc: Dictionary) -> void:
 	var declared := {}                     # signal name -> [file]
 	for key in index:
@@ -129,9 +134,33 @@ static func _add_signal_edges(index: Dictionary, acc: Dictionary) -> void:
 			var name: String = used["name"]
 			if not declared.has(name):
 				continue
-			for owner_file in declared[name]:
-				if owner_file != key:
-					_add(acc, key, owner_file, "signal", "signal %s" % name)
+			var owners: Array = declared[name]
+			if owners.size() == 1:
+				if owners[0] != key:
+					_add(acc, key, owners[0], "signal", "signal %s" % name)
+				continue
+			for owner_file in _resolve_signal_owners(key, owners, acc):
+				_add(acc, key, owner_file, "signal", "signal %s (%d declare it)" % [name, owners.size()])
+
+
+## Narrows a shared signal name to the declarers `key` most plausibly means.
+## Runs after the stronger rules, so `acc` already holds their edges.
+static func _resolve_signal_owners(key: String, owners: Array, acc: Dictionary) -> Array:
+	var linked: Array = []
+	for o in owners:
+		if o != key and acc.has(key + KEY_SEP + o):
+			linked.append(o)
+	if not linked.is_empty():
+		return linked
+	# Declared here too: the file is most likely wiring up its own signal.
+	if owners.has(key):
+		return []
+	var dir := key.get_base_dir()
+	var nearby: Array = []
+	for o in owners:
+		if o.get_base_dir() == dir:
+			nearby.append(o)
+	return nearby
 
 
 ## How hard a file reaches outside itself. Not an edge — a property of the file,

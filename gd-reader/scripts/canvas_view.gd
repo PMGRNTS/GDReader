@@ -24,6 +24,7 @@ const PEEK_TAP_MS := 150       # 🎚 below this a press does nothing at all
 const PEEK_MAP_MS := 550       # 🎚 keep holding and it opens out to the project
 const PEEK_MARGIN := 1.12
 const MAX_RECENTS := 12
+const NOTICE_MS := 1800         # 🎚 how long a one-off confirmation stays up
 
 ## Framing a coupling pair (§10.5) reuses peek's fit maths with a little more air.
 const FRAME_MARGIN := 1.30
@@ -59,6 +60,7 @@ var adopt_idx := -1              # which inferred edge is selected for adoption
 ## connections panel — or select with G — is drawn.
 enum Lines { POINTED, FILE, ALL }
 var lines_mode := Lines.POINTED   # Ctrl+E cycles
+var reduce_motion := false        # Ctrl+Shift+M: twine holds still
 var hover_edge_idx := -1         # row under the pointer in the connections panel
 var hover_link_id := ""
 var zoom_level := 1.0            # §4, the animated value
@@ -129,6 +131,10 @@ var _sel_card: Card = null
 var _search_saved_scroll := 0.0
 var _cli_peek := ""
 var _cli_legend := false
+var _cli_still := false
+var _cli_tie := -1
+var _notice := ""                 # a one-off confirmation the pill shows briefly
+var _notice_until := 0
 var _cli_find := ""
 var _cli_search := ""
 var _cli_loose := false
@@ -191,6 +197,9 @@ func _ready() -> void:
 	_loose.removed.connect(_on_loose_removed)
 
 	_parse_cmdline()
+	if _cli_still:
+		reduce_motion = true
+	_twine.reduce_motion = reduce_motion
 
 	var target := _cli_project
 	if target == "":
@@ -221,6 +230,8 @@ func _ready() -> void:
 		_on_edge_hovered(_cli_hover)
 	if _cli_twine >= 0:
 		select_twine(_cli_twine)
+	if _cli_tie >= 0 and _cli_tie < store.links.size():
+		_twine.tie(store.links[_cli_tie].get("id", ""))
 	if _cli_jump.x >= 0 and not cards.is_empty():
 		var jr := clampi(_cli_jump.x, 0, rows.size() - 1)
 		_jump_to(Vector2i(jr, clampi(_cli_jump.y, 0, cards[jr].size() - 1)))
@@ -277,6 +288,10 @@ func _parse_cmdline() -> void:
 			_cli_peek = args[i + 1]
 		elif a == "--legend":
 			_cli_legend = true
+		elif a == "--reduce-motion":
+			_cli_still = true
+		elif a == "--tie" and i + 1 < args.size():
+			_cli_tie = int(args[i + 1])
 		elif a == "--find" and i + 1 < args.size():
 			_cli_find = args[i + 1]
 		elif a == "--search" and i + 1 < args.size():
@@ -361,6 +376,7 @@ func _build_chrome() -> void:
 
 	var ui: Dictionary = _read_session().get("ui", {})
 	lines_mode = clampi(int(ui.get("lines", Lines.POINTED)), 0, 2) as Lines
+	reduce_motion = bool(ui.get("reduce_motion", false))
 	_conn.visible = bool(ui.get("connections", true))
 	_conn.set_lines_mode(lines_mode)
 
@@ -739,7 +755,9 @@ func _refresh_pill() -> void:
 		_pill.present("", Color.WHITE, [])
 		return
 	var esc := ["Back  Esc", "Return to the focused card", "escape"]
-	if _peek_stage > 0:
+	if _notice != "":
+		_pill.present(_notice, Palette.HEADING, [])
+	elif _peek_stage > 0:
 		var sel_card: Card = cards[_peek_sel.x][_peek_sel.y]
 		_pill.present("Peeking  ·  release Space to land on %s" % sel_card.file_name,
 			Palette.HEADING, [])
@@ -829,6 +847,9 @@ func _process(delta: float) -> void:
 				card.queue_redraw()
 	_process_drag()
 	_tick_blast()
+	if _notice != "" and Time.get_ticks_msec() > _notice_until:
+		_notice = ""
+		_refresh_pill()
 	queue_redraw()
 	# Twine anchors follow the camera, the focused card's scroll and the drag, so
 	# the layer repaints every frame rather than trying to track each of those.
@@ -959,6 +980,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			match event.keycode:
 				KEY_E:
 					set_lines_mode(wrapi(lines_mode + 1, 0, 3))
+				KEY_M:
+					# Shift only: Cmd+M alone minimises the window on macOS.
+					if event.shift_pressed:
+						toggle_reduce_motion()
 				KEY_O:
 					open_project_picker()
 				KEY_P:
@@ -1108,6 +1133,7 @@ func _on_link_confirmed(from_symbol: String, to_symbol: String, description: Str
 	var link := store.add(_pending_from, from_symbol, _pending_to, to_symbol, description)
 	_links_changed()
 	selected_link_id = link["id"]
+	_twine.tie(link["id"])
 	for i in _cycle.size():
 		if _cycle[i]["id"] == link["id"]:
 			_cycle_idx = i
@@ -1644,6 +1670,21 @@ func set_lines_mode(mode: int) -> void:
 	_save_ui()
 
 
+func toggle_reduce_motion() -> void:
+	reduce_motion = not reduce_motion
+	_twine.reduce_motion = reduce_motion
+	_save_ui()
+	notify("Reduce motion on  ·  twine holds still" if reduce_motion
+		else "Reduce motion off  ·  twine sways again")
+
+
+## Shows `text` in the pill for a moment, over whatever state it would name.
+func notify(text: String) -> void:
+	_notice = text
+	_notice_until = Time.get_ticks_msec() + NOTICE_MS
+	_refresh_pill()
+
+
 func toggle_connections() -> void:
 	_conn.visible = not _conn.visible
 	hover_edge_idx = -1
@@ -2040,7 +2081,7 @@ func save_session() -> void:
 
 ## Panel and line preferences belong to the reader, not to a project.
 func _ui_prefs() -> Dictionary:
-	return {"connections": _conn.visible, "lines": int(lines_mode)}
+	return {"connections": _conn.visible, "lines": int(lines_mode), "reduce_motion": reduce_motion}
 
 
 func _save_ui() -> void:

@@ -16,6 +16,7 @@ func _init() -> void:
 	_test_fuzzy_score()
 	_test_coupling()
 	_test_blast()
+	_test_twine_motion()
 	print("\n%d passed, %d failed" % [_passed, _failed])
 	quit(1 if _failed > 0 else 0)
 
@@ -98,10 +99,49 @@ func _test_coupling() -> void:
 		_weight_of(edges, "res://a.gd", "res://base.gd")
 			> _weight_of(edges, "res://hunt.gd", "res://spawn.gd"), true)
 
+	_test_shared_signals()
+
 	check("reach counts tree-climbing",
 		Analyzer.reach_score(GDParser.parse("func f():\n\tget_parent().x = 1\n\towner.y = 2\n")), 2)
 	check("plain code has no reach",
 		Analyzer.reach_score(GDParser.parse("func f():\n\tvar a := 1\n")), 0)
+
+
+## Several heroes each declare `setup_completed` and each state machine connects
+## to its own. A name-only match would pair every machine with every hero.
+func _test_shared_signals() -> void:
+	var hero := "class_name %s\nextends Node\nsignal setup_completed\n"
+	var machine := "extends Node\nfunc _ready():\n\tvar hero = get_parent()\n\thero.setup_completed.connect(_on_hero_setup_completed)\n"
+	var index := {
+		"res://mesa/mesa.gd": GDParser.parse(hero % "Mesa"),
+		"res://mesa/mesa_state_machine.gd": GDParser.parse(machine),
+		"res://brock/brock.gd": GDParser.parse(hero % "Brock"),
+		"res://brock/brock_state_machine.gd": GDParser.parse(machine),
+		"res://nigel/nigel.gd": GDParser.parse(hero % "Nigel"),
+		# Lives elsewhere but names its hero's type, which settles the pairing.
+		"res://machines/nigel_state_machine.gd": GDParser.parse(machine + "\tvar n := hero as Nigel\n"),
+		# Connects to whichever hero it is handed: no single declarer to name.
+		"res://ui/hud.gd": GDParser.parse(machine),
+		"res://world.gd": GDParser.parse("extends Node\nfunc f():\n\tplayer.connect(\"spawned\", _on_x)\n"),
+		"res://player.gd": GDParser.parse("extends Node\nsignal spawned\n"),
+	}
+	var edges := Analyzer.build(index, {})
+
+	check("shared signal pairs with same-folder declarer",
+		_edge_kind(edges, "res://mesa/mesa_state_machine.gd", "res://mesa/mesa.gd", "signal"), true)
+	check("shared signal skips other folders' declarers",
+		_edge_kind(edges, "res://mesa/mesa_state_machine.gd", "res://brock/brock.gd", "signal"), false)
+	check("shared signal prefers an already-coupled declarer",
+		_edge_kind(edges, "res://machines/nigel_state_machine.gd", "res://nigel/nigel.gd", "signal"), true)
+	check("already-coupled declarer excludes the rest",
+		_edge_kind(edges, "res://machines/nigel_state_machine.gd", "res://mesa/mesa.gd", "signal"), false)
+	var hud_signal_edges := 0
+	for e in edges:
+		if e["from_file"] == "res://ui/hud.gd" and e["kinds"].has("signal"):
+			hud_signal_edges += 1
+	check("unplaceable shared signal draws no edge", hud_signal_edges, 0)
+	check("string-form connect names the signal, not the receiver",
+		_edge_kind(edges, "res://world.gd", "res://player.gd", "signal"), true)
 
 
 ## §10.6 blast radius: dependents by ring, walking edges backwards.
@@ -125,6 +165,38 @@ func _test_blast() -> void:
 	check("depth limits the rings",
 		Analyzer.blast(edges, "core", 1)["hops"].has("c"), false)
 	check("nothing depends on a leaf", Analyzer.blast(edges, "c", 3)["hops"].size(), 1)
+
+
+## The twine's spring and pin pop are pure maths, so their feel can be pinned.
+func _test_twine_motion() -> void:
+	check("pin pop starts at nothing", is_zero_approx(TwineLayer.back_ease(0.0)), true)
+	check("pin pop lands at full size", is_equal_approx(TwineLayer.back_ease(1.0), 1.0), true)
+	var peak := 0.0
+	for i in 21:
+		peak = maxf(peak, TwineLayer.back_ease(i / 20.0))
+	check("pin pop overshoots", peak > 1.05, true)
+
+	# A swing must settle — a string that never stops is noise on a reading tool.
+	var sway := _ring(Vector2(0, 20), TwineLayer.SWAY_HZ, TwineLayer.SWAY_DAMPING)
+	check("sway settles within 3s", sway[0] < 0.05, true)
+	check("sway swings past rest", sway[1], true)
+	var twang := _ring(Vector2(0, -40), TwineLayer.TWANG_HZ, TwineLayer.TWANG_DAMPING)
+	check("twang settles within 3s", twang[0] < 0.05, true)
+	check("twang overshoots its sag", twang[1], true)
+
+
+## Runs a spring from `start` for 3s at 60fps. Returns [final distance, crossed rest].
+func _ring(start: Vector2, hz: float, zeta: float) -> Array:
+	var off := start
+	var vel := Vector2.ZERO
+	var crossed := false
+	for i in 180:
+		var s := TwineLayer.spring_step(off, vel, hz, zeta, 1.0 / 60.0)
+		off = s[0]
+		vel = s[1]
+		if signf(off.y) != signf(start.y) and off.y != 0.0:
+			crossed = true
+	return [off.length(), crossed]
 
 
 func _edge_kind(edges: Array, from_file: String, to_file: String, kind: String) -> bool:

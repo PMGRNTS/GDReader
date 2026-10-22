@@ -46,6 +46,7 @@ const ROWS := [
 	["§", "Other"],
 	["Ctrl+O", "Open a different project"],
 	["R", "Re-read the project from disk"],
+	["Ctrl+Shift+M", "Reduce motion: twine holds still"],
 	["?   F1", "Show or hide this legend"],
 	["Esc", "Back out: blast, overview, framing, then selection"],
 	["Ctrl+Q", "Quit"],

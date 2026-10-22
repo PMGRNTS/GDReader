@@ -141,14 +141,17 @@ static func _collect_groups(line: String, idx: int, out: Array) -> void:
 
 
 static func _collect_signals(line: String, idx: int, out: Array) -> void:
-	# `something.connect(...)` — the signal is the identifier before .connect
+	# `died.connect(...)` — the signal is the identifier before .connect.
+	# `node.connect("died", ...)` — the old string form; the identifier before
+	# .connect is the receiver there, so the name comes from the string instead.
 	var at := line.find(".connect(")
 	while at != -1:
-		var j := at - 1
-		var end := at
-		while j >= 0 and (line[j].is_valid_identifier() or line[j].is_valid_int()):
-			j -= 1
-		var name := line.substr(j + 1, end - j - 1)
+		var name := _leading_string_arg(line, at + ".connect(".length())
+		if name == "":
+			var j := at - 1
+			while j >= 0 and (line[j].is_valid_identifier() or line[j].is_valid_int()):
+				j -= 1
+			name = line.substr(j + 1, at - j - 1)
 		if name != "":
 			out.append({"name": name, "line": idx})
 		at = line.find(".connect(", at + 1)
@@ -190,6 +193,18 @@ static func _string_arg_after(line: String, keyword: String) -> String:
 	if close_q == -1:
 		return ""
 	return line.substr(open_q + 1, close_q - open_q - 1)
+
+
+## The string literal that opens the argument list at `from`, or "" when the
+## first argument is anything else.
+static func _leading_string_arg(line: String, from: int) -> String:
+	var rest := line.substr(from).strip_edges(true, false)
+	if not (rest.begins_with("\"") or rest.begins_with("'")):
+		return ""
+	var close_q := rest.find(rest[0], 1)
+	if close_q == -1:
+		return ""
+	return rest.substr(1, close_q - 1)
 
 
 ## Inferred-edge reference sites (§5.3). Falls out of the same pass, which is why
